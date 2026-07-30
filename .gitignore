@@ -1,0 +1,14 @@
+.literature_rag_config.json
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+downloaded_papers/
+literature_projects/
