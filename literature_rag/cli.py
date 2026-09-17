@@ -25,7 +25,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         prog="literature-rag",
-        description="Agentic Literature Review and RAG - Build evidence-grounded literature reviews from arXiv papers",
+        description=(
+            "Agentic Literature Review and RAG - Build evidence-grounded literature "
+            "reviews from arXiv papers"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -65,7 +68,10 @@ Examples:
     parser.add_argument(
         "--objective",
         type=str,
-        help="Specific analysis objective for follow-up searches (required for non-interactive mode)"
+        help=(
+            "Specific analysis objective for follow-up searches; "
+            "required in non-interactive mode"
+        )
     )
     
     # Optional inputs
@@ -166,7 +172,10 @@ def main(args: list[str] | None = None) -> None:
     configure_logging(parsed)
     
     # Determine mode
-    is_interactive = parsed.interactive is None and (parsed.topic is None or parsed.objective is None)
+    is_interactive = (
+        parsed.interactive is None and 
+        (parsed.topic is None or parsed.objective is None)
+    )
     
     if is_interactive:
         run_interactive_mode(parsed)
@@ -182,9 +191,9 @@ def run_interactive_mode(parsed: argparse.Namespace) -> None:
         llm_config = choose_llm()
         topic = input("\nResearch topic: ").strip()
         analysis_question = input("Specific analysis objective: ").strip()
-        local_folder = input("Local PDF folder [optional]: ").strip()
-        doi_values = input("DOIs, comma-separated [optional]: ").strip()
-        unpaywall_email = input("Email for Unpaywall OA lookup [optional]: ").strip()
+        input("Local PDF folder [optional]: ").strip()
+        input("DOIs, comma-separated [optional]: ").strip()
+        input("Email for Unpaywall OA lookup [optional]: ").strip()
         
         endpoint_host = llm_config.base_url.split("//", 1)[-1].split("/", 1)[0]
         consent = (
@@ -218,8 +227,13 @@ def run_non_interactive_mode(parsed: argparse.Namespace) -> None:
         
         # Auto-confirm consent in non-interactive mode
         if not parsed.yes:
-            endpoint_host = llm_config.base_url.split("//", 1)[-1].split("/", 1)[0]
-            logger.warning(f"\nPDF evidence will be sent to {endpoint_host}. Run again with --yes to skip this confirmation.")
+            endpoint_host = (
+                llm_config.base_url.split("//", 1)[-1].split("/", 1)[0]
+            )
+            logger.warning(
+                f"\nPDF evidence will be sent to {endpoint_host}. "
+                "Run again with --yes to skip this confirmation."
+            )
             response = input("Continue? [y/N]: ").strip().lower()
             if response not in {"y", "yes"}:
                 logger.warning("Pipeline cancelled by user")
@@ -240,10 +254,21 @@ def run_non_interactive_mode(parsed: argparse.Namespace) -> None:
         sys.exit(130)
 
 
-def _run_pipeline_with_args(topic: str, analysis_question: str, llm_config: Any, args: argparse.Namespace) -> str:
+def _run_pipeline_with_args(
+    topic: str,
+    analysis_question: str,
+    llm_config: Any,
+    args: argparse.Namespace,
+) -> str:
     """Execute the pipeline with given parameters."""
-    local_pdf_dir = Path(args.local_pdf).expanduser() if args.local_pdf else None
-    dois_list = [value.strip() for value in args.dois.split(",") if value.strip()] if args.dois else []
+    local_pdf_dir = (
+        Path(args.local_pdf).expanduser() if args.local_pdf else None
+    )
+    dois_list = (
+        [value.strip() for value in args.dois.split(",") if value.strip()]
+        if args.dois
+        else []
+    )
     
     return run_pipeline(
         topic=topic,

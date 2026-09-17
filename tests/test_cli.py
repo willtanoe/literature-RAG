@@ -1,4 +1,5 @@
 """Tests for CLI module."""
+import contextlib
 from unittest.mock import Mock, patch
 
 import pytest
@@ -63,10 +64,8 @@ class TestMain:
     def test_non_interactive_mode(self, mock_pipeline, mock_choose_llm, mock_setup_logging):
         """Non-interactive mode execution."""
         # Should fail because LLM config doesn't exist yet, but we're testing the flow
-        try:
+        with contextlib.suppress(SystemExit):
             main(["--topic", "test", "--objective", "analyze", "-y"])
-        except SystemExit:
-            pass
         
         # Verify non-interactive mode was called
         assert mock_choose_llm.called
@@ -81,28 +80,34 @@ class TestMain:
     def test_keyboard_interrupt_handling(self, mock_pipeline, mock_choose_llm, mock_setup_logging):
         """KeyboardInterrupt should be caught and handled gracefully."""
         # This test just verifies the structure - actual handling tested via manual testing
-        assert hasattr(main, '__call__')
-
+        assert callable(main)
+    
     @patch("literature_rag.cli.run_pipeline")
-    @patch("literature_rag.input", side_effect=["llm-profile", "http://localhost/v1", "secret", "model", 
-                                                "test topic", "test objective", "", "", ""])
-    def test_consent_refused(self, mock_inputs, mock_pipeline, mock_choose_llm, mock_setup_logging):
+    @patch(
+        "literature_rag.input",
+        side_effect=[
+            "llm-profile",
+            "http://localhost/v1",
+            "secret",
+            "model",
+            "test topic",
+            "test objective",
+            "",
+            "",
+            "",
+        ],
+    )
+    def test_consent_refused(
+        self, mock_inputs, mock_pipeline, mock_choose_llm, mock_setup_logging
+    ):
         """User can refuse consent."""
         mock_config = Mock()
         mock_config.base_url = "https://example.com/v1"
         mock_choose_llm.return_value = mock_config
         
-        with pytest.raises(SystemExit) as exc_info:
-            main([
-                "--topic", "test", 
-                "--objective", "analyze",
-            ])
+        with pytest.raises(SystemExit):
+            main(["--topic", "test", "--objective", "analyze"])
         
         # User refused consent so pipeline should not run
         assert not mock_pipeline.called
-
-    def test_keyboard_interrupt_handling(self, mock_choose_llm, mock_setup_logging):
-        """KeyboardInterrupt handling structure is in place."""
-        # Just verify this doesn't raise unexpected exceptions during parsing setup
-        assert True  # Test passes if we get here
 

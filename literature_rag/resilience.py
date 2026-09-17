@@ -77,6 +77,18 @@ def redact_secrets(message: object, secrets: tuple[str, ...] = ()) -> str:
     return result
 
 
+def _is_process_alive(pid: int) -> bool:
+    """Check if a process with given PID exists."""
+    try:
+        # PID <= 0 is not valid for existence check
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 @contextmanager
 def workspace_lock(root: Path, timeout_seconds: int = 300) -> Iterator[None]:
     """Acquire exclusive workspace lock with stale-lock detection.
@@ -114,7 +126,7 @@ def workspace_lock(root: Path, timeout_seconds: int = 300) -> Iterator[None]:
                 lock.unlink()
                 descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             elif locked_pid and _is_process_alive(locked_pid):
-                raise RuntimeError(f"Workspace in use by PID {locked_pid}")
+                raise RuntimeError(f"Workspace in use by PID {locked_pid}") from None
             else:
                 # Orphaned lock (process gone or invalid PID)
                 logger.warning(f"Removing orphaned lock from PID {locked_pid}")
@@ -122,9 +134,9 @@ def workspace_lock(root: Path, timeout_seconds: int = 300) -> Iterator[None]:
                 descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except (OSError, json.JSONDecodeError) as e:
             logger.error(f"Lock file corrupted: {e}")
-            raise RuntimeError(f"Cannot acquire lock: {e}")
+            raise RuntimeError(f"Cannot acquire lock: {e}") from None
         except Exception as e:
-            raise RuntimeError(f"Workspace conflict: {e}")
+            raise RuntimeError(f"Workspace conflict: {e}") from None
     
     try:
         # Write lock metadata
