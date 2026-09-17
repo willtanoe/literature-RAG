@@ -4,9 +4,12 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from literature_rag.__log__ import get_logger
 from literature_rag.config import LLMConfig
 from literature_rag.papers import DownloadedPaper, Paper
 from literature_rag.resilience import atomic_write_json, atomic_write_text
+
+logger = get_logger(__name__)
 
 
 def export_review(
@@ -35,9 +38,9 @@ def export_review(
     }
     atomic_write_json(manifest_path, manifest)
     atomic_write_text(bibliography_path, "\n\n".join(_bibtex(paper) for paper in papers) + "\n")
-    print(f"Export -> Markdown: {report_path}")
-    print(f"Export -> JSON: {manifest_path}")
-    print(f"Export -> BibTeX: {bibliography_path}")
+    logger.info(f"Markdown: {report_path}")
+    logger.info(f"JSON: {manifest_path}")
+    logger.info(f"BibTeX: {bibliography_path}")
     return {"markdown": report_path, "json": manifest_path, "bibtex": bibliography_path}
 
 

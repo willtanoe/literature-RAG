@@ -8,9 +8,12 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from literature_rag.__log__ import get_logger
 from literature_rag.config import LLMConfig
 from literature_rag.resilience import atomic_write_text, redact_secrets
 from literature_rag.validation import audit_citations, validate_report
+
+logger = get_logger(__name__)
 
 ANALYSIS_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -76,7 +79,7 @@ def generate_analysis(
 ) -> str:
     if retrieval_k < 1:
         raise ValueError("retrieval_k must be at least 1.")
-    print("Generating Analysis -> retrieving relevant evidence")
+    logger.info("Retrieving relevant evidence")
     retrieval_query = (
         f"Research topic: {topic}. Analysis objective: {analysis_question}. "
         "Find methodologies, experiments, results, limitations, comparisons, and open problems."
@@ -117,7 +120,7 @@ def generate_analysis(
         model=llm_config.model_name,
         temperature=0.2,
     )
-    print("Generating Analysis -> calling configured OpenAI-compatible endpoint")
+    logger.info("Calling configured OpenAI-compatible endpoint")
     try:
         context = _format_context(documents)
         allowed_ids = {document.metadata["evidence_id"] for document in documents}
@@ -131,7 +134,7 @@ def generate_analysis(
         if draft_path is not None:
             atomic_write_text(draft_path, draft.rstrip() + "\n")
         audit = audit_citations(draft, allowed_ids)
-        print("Generating Analysis -> critic auditing claims and citations")
+        logger.info("Auditing claims and citations")
         revised = (CRITIC_PROMPT | llm | StrOutputParser()).invoke(
             {"context": context, "draft": draft, "audit": audit}
         )

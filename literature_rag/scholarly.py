@@ -7,9 +7,12 @@ from pathlib import Path
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from literature_rag.__log__ import get_logger
 from literature_rag.papers import Paper
 from literature_rag.resilience import atomic_write_json, http_retry_after, retry
 from literature_rag.settings import NETWORK_ATTEMPTS, NETWORK_TIMEOUT
+
+logger = get_logger(__name__)
 
 
 def enrich_papers(
@@ -58,7 +61,7 @@ def _lookup_metadata(paper: Paper, email: str) -> dict:
                 year=_crossref_year(message),
             )
         except Exception as exc:
-            print(f"Metadata -> Crossref unavailable for {paper.doi}: {exc}")
+            logger.debug(f"Crossref metadata unavailable for {paper.doi}: {exc}")
         if email:
             try:
                 oa = _get_json(
@@ -68,7 +71,7 @@ def _lookup_metadata(paper: Paper, email: str) -> dict:
                 data["pdf_url"] = location.get("url_for_pdf") or paper.pdf_url
                 data["is_open_access"] = bool(oa.get("is_oa"))
             except Exception as exc:
-                print(f"Metadata -> Unpaywall unavailable for {paper.doi}: {exc}")
+                logger.debug(f"Unpaywall OA lookup unavailable for {paper.doi}: {exc}")
     try:
         identity = f"DOI:{paper.doi}" if paper.doi else f"ARXIV:{paper.arxiv_id}"
         fields = "citationCount,year,venue,openAccessPdf"
@@ -82,7 +85,7 @@ def _lookup_metadata(paper: Paper, email: str) -> dict:
         oa_pdf = semantic.get("openAccessPdf") or {}
         data["pdf_url"] = data.get("pdf_url") or oa_pdf.get("url") or paper.pdf_url
     except Exception as exc:
-        print(f"Metadata -> Semantic Scholar unavailable for {key_label(paper)}: {exc}")
+        logger.debug(f"Semantic Scholar metadata unavailable for {key_label(paper)}: {exc}")
     return data
 
 

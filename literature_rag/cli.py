@@ -1,8 +1,11 @@
 from pathlib import Path
 
+from literature_rag.__log__ import get_logger
 from literature_rag.config import choose_llm
 from literature_rag.pipeline import run_pipeline
 from literature_rag.settings import DEFAULT_RETRIEVAL_K, DEFAULT_TOP_N
+
+logger = get_logger(__name__)
 
 
 def main() -> None:
@@ -22,7 +25,7 @@ def main() -> None:
             .lower()
         )
         if consent not in {"y", "yes"}:
-            print("Pipeline cancelled -> no document content was sent")
+            logger.warning("Pipeline cancelled")
             return
         report = run_pipeline(
             topic=topic,
@@ -36,4 +39,4 @@ def main() -> None:
         )
         print("\n" + report)
     except (ValueError, RuntimeError) as exc:
-        print(f"\nPipeline failed -> {exc}")
+        logger.error(f"Pipeline failed: {exc}")

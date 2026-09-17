@@ -8,6 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from literature_rag.__log__ import get_logger
 from literature_rag.config import LLMConfig
 from literature_rag.papers import (
     Paper,
@@ -15,6 +16,8 @@ from literature_rag.papers import (
     save_search_cache,
     search_arxiv,
 )
+
+logger = get_logger(__name__)
 
 SEARCH_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -47,7 +50,7 @@ def iterative_search(
     ).hexdigest()
     cached = load_search_cache(cache_path, topic, max_results, cache_identity)
     if cached is not None:
-        print(f"Search Agent -> resumed {len(cached)} cached paper(s)")
+        logger.info(f"Resumed {len(cached)} cached paper(s)")
         return cached
 
     llm = ChatOpenAI(
@@ -66,7 +69,7 @@ def iterative_search(
         if round_number == 1:
             query = topic
         else:
-            print(f"Search Agent -> planning coverage round {round_number}/{max_rounds}")
+            logger.info(f"Planning coverage round {round_number}/{max_rounds}")
             try:
                 query = planner.invoke(
                     {
@@ -77,17 +80,17 @@ def iterative_search(
                     }
                 ).strip()
             except Exception as exc:
-                print(f"Search Agent -> planner unavailable: {exc}")
+                logger.warning(f"Planner unavailable: {exc}")
                 break
         if not query or query.lower() in {value.lower() for value in queries}:
-            print("Search Agent -> stopped: no novel query")
+            logger.debug("No novel query")
             break
         queries.append(query)
-        print(f"Search Agent -> round {round_number}: {query}")
+        logger.info(f"Round {round_number}: {query}")
         try:
             candidates = search_arxiv(query, per_round)
         except RuntimeError as exc:
-            print(f"Search Agent -> query produced no usable result: {exc}")
+            logger.warning(f"Query produced no usable result: {exc}")
             continue
         added = 0
         for paper in candidates:
@@ -96,17 +99,17 @@ def iterative_search(
                 seen.add(paper_identity)
                 papers.append(paper)
                 added += 1
-        print(f"Search Agent -> added {added} novel paper(s)")
+        logger.info(f"Added {added} novel paper(s)")
         if len(papers) >= max_results:
-            print("Search Agent -> stopped: coverage target reached")
+            logger.info("Coverage target reached")
             break
         if added == 0:
-            print("Search Agent -> stopped: no novel papers")
+            logger.debug("No novel papers")
             break
 
     if not papers:
         raise RuntimeError("Search agent found no papers.")
     papers = papers[:max_results]
     save_search_cache(cache_path, topic, max_results, papers, cache_identity)
-    print(f"Search Agent -> selected {len(papers)} unique paper(s)")
+    logger.info(f"Selected {len(papers)} unique paper(s)")
     return papers

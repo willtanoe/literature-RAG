@@ -15,6 +15,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from literature_rag.__log__ import get_logger
 from literature_rag.papers import DownloadedPaper
 from literature_rag.resilience import atomic_write_json
 from literature_rag.settings import (
@@ -25,6 +26,8 @@ from literature_rag.settings import (
     MAX_PDF_PAGES,
 )
 
+logger = get_logger(__name__)
+
 
 def load_and_split_papers(downloaded: list[DownloadedPaper]) -> list[Any]:
     splitter = RecursiveCharacterTextSplitter(
@@ -33,7 +36,7 @@ def load_and_split_papers(downloaded: list[DownloadedPaper]) -> list[Any]:
     )
     chunks: list[Any] = []
     for path, paper in downloaded:
-        print(f"Embedding -> loading {path.name}")
+        logger.debug(f"Loading PDF: {path.name}")
         try:
             pages = PyPDFLoader(str(path)).load()
             if len(pages) > MAX_PDF_PAGES:
@@ -66,21 +69,21 @@ def load_and_split_papers(downloaded: list[DownloadedPaper]) -> list[Any]:
                 excess = projected - MAX_CHUNKS
                 dropped = paper_chunks[-excess:] if excess <= len(paper_chunks) else paper_chunks
                 paper_chunks = paper_chunks[:-excess] if excess <= len(paper_chunks) else []
-                print(f"Embedding -> truncated {len(dropped)} chunk(s) to stay within budget")
+                logger.warning(f"Truncated {len(dropped)} chunk(s) to stay within budget")
             chunks.extend(paper_chunks)
         except Exception as exc:
-            print(f"Embedding -> skipped {path.name}: {exc}")
+            logger.warning(f"Skipping {path.name}: {exc}")
     chunks = [chunk for chunk in chunks if chunk.page_content.strip()]
     if not chunks:
         raise RuntimeError("No readable text was extracted from the downloaded PDFs.")
     if len(chunks) > MAX_CHUNKS:
         raise RuntimeError(f"Corpus exceeds {MAX_CHUNKS} chunks after truncation")
-    print(f"Embedding -> created {len(chunks)} chunk(s)")
+    logger.info(f"Created {len(chunks)} chunk(s)")
     return chunks
 
 
 def build_vector_store(chunks: list[Any]) -> FAISS:
-    print(f"Embedding -> encoding locally with {EMBEDDING_MODEL}")
+    logger.info(f"Encoding locally with {EMBEDDING_MODEL}")
     try:
         embeddings = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL,
@@ -90,7 +93,7 @@ def build_vector_store(chunks: list[Any]) -> FAISS:
         vector_store = FAISS.from_documents(chunks, embeddings)
     except Exception as exc:
         raise RuntimeError(f"Embedding or FAISS indexing failed: {exc}") from exc
-    print("Embedding -> FAISS index ready")
+    logger.info("FAISS index ready")
     return vector_store
 
 
@@ -102,13 +105,13 @@ def load_or_build_vector_store(downloaded: list[DownloadedPaper], index_dir: Pat
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("fingerprint") == fingerprint and _index_integrity(index_dir, manifest):
             vector_store = _load_safe_index(index_dir, embeddings)
-            print(f"Embedding -> resumed persisted FAISS index in {index_dir}")
+            logger.info(f"Resuming persisted FAISS index in {index_dir}")
             return vector_store
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         pass
 
     chunks = load_and_split_papers(downloaded)
-    print(f"Embedding -> encoding locally with {EMBEDDING_MODEL}")
+    logger.info(f"Encoding locally with {EMBEDDING_MODEL}")
     temporary: Path | None = None
     try:
         vector_store = FAISS.from_documents(chunks, embeddings)
@@ -129,7 +132,7 @@ def load_or_build_vector_store(downloaded: list[DownloadedPaper], index_dir: Pat
     finally:
         if temporary is not None and temporary.exists():
             shutil.rmtree(temporary, ignore_errors=True)
-    print(f"Embedding -> persisted FAISS index in {index_dir}")
+    logger.info(f"Persisted FAISS index in {index_dir}")
     return vector_store
 
 

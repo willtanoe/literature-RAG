@@ -11,8 +11,11 @@ from urllib.parse import urlparse
 import keyring
 from keyring.errors import KeyringError
 
+from literature_rag.__log__ import get_logger
 from literature_rag.resilience import atomic_write_json
 from literature_rag.settings import CONFIG_PATH
+
+logger = get_logger(__name__)
 
 KEYRING_SERVICE = "agentic-literature-rag"
 
@@ -48,11 +51,11 @@ def prompt_required(label: str, secret: bool = False) -> str:
         value = (getpass.getpass(f"{label}: ") if secret else input(f"{label}: ")).strip()
         if value:
             return value
-        print(f"Configuration -> {label} cannot be empty")
+        logger.warning(f"{label} cannot be empty")
 
 
 def add_profile(config: dict[str, Any], config_path: Path) -> tuple[dict[str, Any], str]:
-    print("\nAdd OpenAI-compatible endpoint")
+    logger.info("Add OpenAI-compatible endpoint")
     name = prompt_required("Profile name")
     base_url = prompt_required("Base URL (for example https://host.example/v1)").rstrip("/")
     parsed_url = urlparse(base_url)
@@ -64,9 +67,7 @@ def add_profile(config: dict[str, Any], config_path: Path) -> tuple[dict[str, An
         keyring.set_password(KEYRING_SERVICE, key_ref, api_key)
     except KeyringError as exc:
         key_ref = ""
-        print(
-            f"Configuration -> keyring unavailable; key will be kept for this session only: {exc}"
-        )
+        logger.debug(f"Keyring unavailable; session-only key: {exc}")
     model_name = prompt_required("Model name")
     profile = {
         "name": name,
@@ -77,13 +78,13 @@ def add_profile(config: dict[str, Any], config_path: Path) -> tuple[dict[str, An
     config["profiles"].append(profile)
     save_config(config, config_path)
     profile["_session_api_key"] = api_key
-    print(f"Configuration -> saved {name} in {config_path}")
+    logger.info(f"Saved {name} in {config_path}")
     return profile, model_name
 
 
 def add_model(config: dict[str, Any], config_path: Path) -> tuple[dict[str, Any], str]:
     profiles = config["profiles"]
-    print("\nChoose endpoint")
+    logger.info("Choose endpoint")
     for index, profile in enumerate(profiles, start=1):
         print(f"  {index}. {profile['name']} ({profile['base_url']})")
     choice = input("Endpoint number: ").strip()
@@ -95,7 +96,7 @@ def add_model(config: dict[str, Any], config_path: Path) -> tuple[dict[str, Any]
     if model_name not in models:
         models.append(model_name)
         save_config(config, config_path)
-    print(f"Configuration -> model ready: {profile['name']} / {model_name}")
+    logger.info(f"Model ready: {profile['name']} / {model_name}")
     return profile, model_name
 
 
@@ -108,7 +109,7 @@ def choose_llm(config_path: Path = CONFIG_PATH) -> LLMConfig:
     choices = [
         (profile, model) for profile in config["profiles"] for model in profile.get("models", [])
     ]
-    print("\nChoose LLM")
+    logger.info("Choose LLM")
     for index, (profile, model) in enumerate(choices, start=1):
         print(f"  {index}. {profile['name']} / {model}")
     print(f"  {len(choices) + 1}. Add endpoint + API key")
@@ -125,7 +126,7 @@ def choose_llm(config_path: Path = CONFIG_PATH) -> LLMConfig:
         profile, model_name = add_model(config, config_path)
     else:
         raise ValueError("Invalid LLM selection.")
-    print(f"Configuration -> using {profile['name']} / {model_name}")
+    logger.info(f"Using {profile['name']} / {model_name}")
     return _to_llm_config(profile, model_name, config, config_path)
 
 
@@ -145,17 +146,17 @@ def _to_llm_config(
         except KeyringError as exc:
             key_ref = ""
             session_key = legacy_key
-            print(f"Configuration -> keyring unavailable; migrated key is session-only: {exc}")
+            logger.debug(f"Keyring unavailable; migrated key is session-only: {exc}")
         profile["key_ref"] = key_ref
         save_config(config, config_path)
         if key_ref:
-            print("Configuration -> migrated API key to the operating-system keyring")
+            logger.info("Migrated API key to OS keyring")
     try:
         api_key = session_key or (
             keyring.get_password(KEYRING_SERVICE, key_ref) if key_ref else None
         )
     except KeyringError as exc:
-        print(f"Configuration -> keyring unavailable; requesting a session key: {exc}")
+        logger.warning(f"Keyring unavailable; requesting session key: {exc}")
         api_key = None
     if not api_key:
         api_key = prompt_required("API key (keyring unavailable or entry missing)", secret=True)

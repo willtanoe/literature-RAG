@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from pathlib import Path
 
+from literature_rag.__log__ import get_logger
 from literature_rag.analysis import generate_analysis
 from literature_rag.config import LLMConfig
 from literature_rag.export import export_review
@@ -17,6 +20,8 @@ from literature_rag.search_agent import iterative_search
 from literature_rag.settings import DOWNLOAD_DIR
 from literature_rag.workspace import ProjectWorkspace, get_workspace
 
+logger = get_logger(__name__)
+
 
 def run_pipeline(
     topic: str,
@@ -31,7 +36,7 @@ def run_pipeline(
 ) -> str:
     workspace = get_workspace(topic) if download_dir == DOWNLOAD_DIR else None
     paper_dir = workspace.papers if workspace else download_dir
-    print(f"Project -> {workspace.root}" if workspace else f"Project -> {paper_dir}")
+    logger.info(f"Project -> {workspace.root}" if workspace else f"Project -> {paper_dir}")
     lock_root = workspace.root if workspace else paper_dir
     output_dir = workspace.output if workspace else paper_dir / "output"
     with workspace_lock(lock_root):

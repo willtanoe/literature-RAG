@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 import arxiv
 
+from literature_rag.__log__ import get_logger
 from literature_rag.resilience import atomic_write_json, http_retry_after, retry
 from literature_rag.settings import (
     DOWNLOAD_DIR,
@@ -20,6 +21,8 @@ from literature_rag.settings import (
     NETWORK_TIMEOUT,
     SEARCH_CACHE_VERSION,
 )
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,10 +56,10 @@ def search_arxiv(topic: str, max_results: int, cache_path: Path | None = None) -
         raise ValueError("max_results must be at least 1.")
     cached = load_search_cache(cache_path, topic, max_results)
     if cached is not None:
-        print(f"Searching -> resumed {len(cached)} cached paper(s)")
+        logger.info(f"Resumed {len(cached)} cached paper(s)")
         return cached
 
-    print(f"Searching -> arXiv topic: {topic!r}")
+    logger.info(f"Searching arXiv for topic: {topic!r}")
     search = arxiv.Search(
         query=f'all:"{topic.strip()}"',
         max_results=max_results,
@@ -79,7 +82,7 @@ def search_arxiv(topic: str, max_results: int, cache_path: Path | None = None) -
     if not results:
         raise RuntimeError(f"No arXiv papers found for {topic!r}.")
     save_search_cache(cache_path, topic, max_results, results)
-    print(f"Searching -> found {len(results)} paper(s)")
+    logger.info(f"Found {len(results)} paper(s)")
     return results
 
 
@@ -92,7 +95,7 @@ def download_papers(
     for index, paper in enumerate(papers, start=1):
         filename = _paper_filename(paper)
         target = download_dir / filename
-        print(f"Downloading -> [{index}/{len(papers)}] {paper.title}")
+        logger.info(f"Downloading [{index}/{len(papers)}] {paper.title}")
         try:
             if not _is_pdf(target):
                 _download_pdf(paper.pdf_url, target)
@@ -100,9 +103,9 @@ def download_papers(
                 raise OSError("downloaded file is not a valid PDF")
             downloaded.append((target, paper))
         except Exception as exc:
-            print(f"Downloading -> skipped {paper.arxiv_id}: {exc}")
+            logger.warning(f"Skipping {paper.arxiv_id}: {exc}")
             failed.append(FailedDownload(target, paper, str(exc)))
-    print(f"Downloading -> ready: {len(downloaded)} PDF(s) in {download_dir}")
+    logger.info(f"Ready: {len(downloaded)} PDF(s) in {download_dir}")
     return downloaded, failed
 
 
@@ -134,7 +137,7 @@ def import_local_pdfs(source_dir: Path, destination_dir: Path) -> list[Downloade
     imported: list[DownloadedPaper] = []
     for source in sorted(source_dir.glob("*.pdf")):
         if not _is_pdf(source):
-            print(f"Import -> skipped invalid PDF: {source.name}")
+            logger.warning(f"Skipping invalid PDF: {source.name}")
             continue
         digest = _file_hash(source)
         target = destination_dir / f"local_{digest[:12]}_{_safe_filename(source.stem)}.pdf"
@@ -148,7 +151,7 @@ def import_local_pdfs(source_dir: Path, destination_dir: Path) -> list[Downloade
             pdf_url="",
         )
         imported.append((target, paper))
-        print(f"Import -> ready {source.name}")
+        logger.info(f"Imported {source.name}")
     return imported
 
 
@@ -160,12 +163,12 @@ def deduplicate_downloads(papers: list[DownloadedPaper]) -> list[DownloadedPaper
         identity = _paper_identity(paper)
         digest = _file_hash(path)
         if identity in seen_ids or digest in seen_hashes:
-            print(f"Deduplication -> skipped duplicate: {paper.title}")
+            logger.debug(f"Skipped duplicate: {paper.title}")
             continue
         seen_ids.add(identity)
         seen_hashes.add(digest)
         unique.append((path, paper))
-    print(f"Deduplication -> {len(unique)} unique PDF(s)")
+    logger.info(f"{len(unique)} unique PDF(s)")
     return unique
 
 
@@ -175,16 +178,16 @@ def recover_manual_downloads(
     if not failed:
         return downloaded
 
-    print("\nManual download required")
-    print("Some PDFs could not be retrieved automatically. This can be caused by")
-    print("network restrictions, unavailable files, or publisher access controls.")
+    logger.warning("Manual download required")
+    logger.warning("Some PDFs could not be retrieved automatically. This can be caused by")
+    logger.warning("network restrictions, unavailable files, or publisher access controls.")
     for index, item in enumerate(failed, start=1):
-        print(f"\n[{index}] {item.paper.title}")
-        print(f"    arXiv: {item.paper.entry_id}")
+        logger.info(f"[{index}] {item.paper.title}")
+        logger.info(f"    arXiv: {item.paper.entry_id}")
         if item.paper.doi:
-            print(f"    DOI: https://doi.org/{item.paper.doi}")
-        print(f"    Save as: {item.target.resolve()}")
-        print(f"    Reason: {item.error}")
+            logger.info(f"    DOI: https://doi.org/{item.paper.doi}")
+        logger.info(f"    Save as: {item.target.resolve()}")
+        logger.info(f"    Reason: {item.error}")
 
     pending = failed
     while pending:
@@ -206,16 +209,16 @@ def recover_manual_downloads(
         for item in pending:
             if _is_pdf(item.target):
                 downloaded.append((item.target, item.paper))
-                print(f"Manual download -> found {item.target.name}")
+                logger.info(f"Found {item.target.name}")
             else:
                 remaining.append(item)
-                print(f"Manual download -> still missing/invalid: {item.target.name}")
+                logger.info(f"Still missing/invalid: {item.target.name}")
         pending = remaining
 
     if not downloaded:
         raise RuntimeError("No valid PDFs are available to index.")
     if pending:
-        print(f"Manual download -> skipped {len(pending)} paper(s)")
+        logger.info(f"Skipped {len(pending)} paper(s)")
     return downloaded
 
 
