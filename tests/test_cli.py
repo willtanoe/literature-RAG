@@ -1,7 +1,7 @@
 """Tests for CLI module."""
-import pytest
-from io import StringIO
 from unittest.mock import Mock, patch
+
+import pytest
 
 from literature_rag.cli import main, parse_args
 

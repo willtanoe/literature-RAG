@@ -1,9 +1,6 @@
 import json
-import os
 import time
 from urllib.error import URLError
-
-import pytest
 
 from literature_rag.resilience import atomic_write_json, redact_secrets, retry, workspace_lock
 
@@ -23,9 +20,8 @@ def test_workspace_lock_rejects_concurrent_writer(tmp_path):
     assert not (tmp_path / ".lock").exists()
     
     # Re-entry in same thread/context should be allowed (we handle it gracefully)
-    with workspace_lock(tmp_path):
-        with workspace_lock(tmp_path):
-            pass  # Nested context - handled by checking our own PID
+    with workspace_lock(tmp_path), workspace_lock(tmp_path):
+        pass  # Nested context - handled by checking our own PID
 
 
 def test_workspace_lock_detects_stale_lock(tmp_path, monkeypatch):

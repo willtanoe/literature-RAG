@@ -143,9 +143,7 @@ def configure_logging(args: argparse.Namespace) -> None:
     level = "INFO"
     log_file = None
     
-    if args.verbose >= 3:
-        level = "DEBUG"
-    elif args.verbose == 2:
+    if args.verbose >= 3 or args.verbose == 2:
         level = "DEBUG"
     elif args.verbose == 1:
         level = "INFO"
@@ -222,7 +220,7 @@ def run_non_interactive_mode(parsed: argparse.Namespace) -> None:
         if not parsed.yes:
             endpoint_host = llm_config.base_url.split("//", 1)[-1].split("/", 1)[0]
             logger.warning(f"\nPDF evidence will be sent to {endpoint_host}. Run again with --yes to skip this confirmation.")
-            response = input(f"Continue? [y/N]: ").strip().lower()
+            response = input("Continue? [y/N]: ").strip().lower()
             if response not in {"y", "yes"}:
                 logger.warning("Pipeline cancelled by user")
                 return
