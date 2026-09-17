@@ -1,4 +1,5 @@
 """Logging configuration for literature-rag."""
+
 from __future__ import annotations
 
 import logging
