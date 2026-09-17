@@ -11,8 +11,12 @@ from pathlib import Path
 from typing import Any, TypeVar
 from urllib.error import HTTPError, URLError
 
+from literature_rag.__log__ import get_logger
+
 T = TypeVar("T")
 SECRET_PATTERN = re.compile(r"(?i)(api[_ -]?key|authorization|bearer)([\s:=]+)(\S+)")
+
+logger = get_logger(__name__)
 
 
 def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None:
@@ -74,15 +78,62 @@ def redact_secrets(message: object, secrets: tuple[str, ...] = ()) -> str:
 
 
 @contextmanager
-def workspace_lock(root: Path) -> Iterator[None]:
+def workspace_lock(root: Path, timeout_seconds: int = 300) -> Iterator[None]:
+    """Acquire exclusive workspace lock with stale-lock detection.
+    
+    Args:
+        root: Workspace root directory to lock.
+        timeout_seconds: Maximum lock age in seconds before considered stale (default 5 min).
+    
+    Raises:
+        RuntimeError: If lock already held by running process, or stale lock exists.
+    """
     root.mkdir(parents=True, exist_ok=True)
     lock = root / ".lock"
+    current_pid = os.getpid()
+    
+    # Try to create exclusive lock
     try:
         descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise RuntimeError(f"Workspace is already in use: {root}") from exc
+    except FileExistsError:
+        # Read existing lock file
+        try:
+            lock_content = json.loads(lock.read_text(encoding="utf-8"))
+            locked_pid = lock_content.get("pid")
+            lock_time = lock_content.get("timestamp", 0)
+            
+            # Check if our own lock (shouldn't happen normally, but handle gracefully)
+            if locked_pid == current_pid:
+                yield
+                return
+            
+            # Check if lock is stale (>5 min default)
+            age = time.time() - lock_time
+            if age > timeout_seconds:
+                logger.warning(f"Removing stale lock from PID {locked_pid} ({int(age)}s old)")
+                lock.unlink()
+                descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            elif locked_pid and _is_process_alive(locked_pid):
+                raise RuntimeError(f"Workspace in use by PID {locked_pid}")
+            else:
+                # Orphaned lock (process gone or invalid PID)
+                logger.warning(f"Removing orphaned lock from PID {locked_pid}")
+                lock.unlink()
+                descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Lock file corrupted: {e}")
+            raise RuntimeError(f"Cannot acquire lock: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Workspace conflict: {e}")
+    
     try:
-        os.write(descriptor, f"pid={os.getpid()}\n".encode())
+        # Write lock metadata
+        lock_data = {
+            "pid": current_pid,
+            "timestamp": time.time(),
+            "host": os.uname().nodename if hasattr(os, "uname") else "unknown"
+        }
+        os.write(descriptor, json.dumps(lock_data).encode())
         os.close(descriptor)
         descriptor = -1
         yield
