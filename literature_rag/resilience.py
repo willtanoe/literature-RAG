@@ -4,9 +4,11 @@ import json
 import os
 import random
 import re
+import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.error import HTTPError, URLError
@@ -90,20 +92,45 @@ def _is_process_alive(pid: int) -> bool:
 
 
 @contextmanager
+def tee_stdout(log_path: Path) -> Iterator[None]:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    original = sys.stdout
+
+    class _Tee:
+        def write(self, data: str) -> int:
+            original.write(data)
+            if data and ("\n" in data or "\r" not in data):
+                log_file.write(data.replace("\r", ""))
+            return len(data)
+
+        def flush(self) -> None:
+            original.flush()
+            log_file.flush()
+
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"\n===== run started {datetime.now(timezone.utc).isoformat()} =====\n")
+        sys.stdout = _Tee()
+        try:
+            yield
+        finally:
+            sys.stdout = original
+
+
+@contextmanager
 def workspace_lock(root: Path, timeout_seconds: int = 300) -> Iterator[None]:
     """Acquire exclusive workspace lock with stale-lock detection.
-    
+
     Args:
         root: Workspace root directory to lock.
         timeout_seconds: Maximum lock age in seconds before considered stale (default 5 min).
-    
+
     Raises:
         RuntimeError: If lock already held by running process, or stale lock exists.
     """
     root.mkdir(parents=True, exist_ok=True)
     lock = root / ".lock"
     current_pid = os.getpid()
-    
+
     # Try to create exclusive lock
     try:
         descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -113,12 +140,12 @@ def workspace_lock(root: Path, timeout_seconds: int = 300) -> Iterator[None]:
             lock_content = json.loads(lock.read_text(encoding="utf-8"))
             locked_pid = lock_content.get("pid")
             lock_time = lock_content.get("timestamp", 0)
-            
+
             # Check if our own lock (shouldn't happen normally, but handle gracefully)
             if locked_pid == current_pid:
                 yield
                 return
-            
+
             # Check if lock is stale (>5 min default)
             age = time.time() - lock_time
             if age > timeout_seconds:
@@ -137,13 +164,13 @@ def workspace_lock(root: Path, timeout_seconds: int = 300) -> Iterator[None]:
             raise RuntimeError(f"Cannot acquire lock: {e}") from None
         except Exception as e:
             raise RuntimeError(f"Workspace conflict: {e}") from None
-    
+
     try:
         # Write lock metadata
         lock_data = {
             "pid": current_pid,
             "timestamp": time.time(),
-            "host": os.uname().nodename if hasattr(os, "uname") else "unknown"
+            "host": os.uname().nodename if hasattr(os, "uname") else "unknown",
         }
         os.write(descriptor, json.dumps(lock_data).encode())
         os.close(descriptor)

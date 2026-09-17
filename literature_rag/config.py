@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -12,12 +13,14 @@ import keyring
 from keyring.errors import KeyringError
 
 from literature_rag.__log__ import get_logger
-from literature_rag.resilience import atomic_write_json
+from literature_rag.resilience import atomic_write_json, redact_secrets
 from literature_rag.settings import CONFIG_PATH
 
 logger = get_logger(__name__)
 
 KEYRING_SERVICE = "agentic-literature-rag"
+S2_KEYRING_USER = "semantic-scholar"
+S2_ENV_VAR = "S2_API_KEY"
 
 
 @dataclass(frozen=True)
@@ -100,34 +103,172 @@ def add_model(config: dict[str, Any], config_path: Path) -> tuple[dict[str, Any]
     return profile, model_name
 
 
+def _confirm(prompt: str) -> bool:
+    return input(f"{prompt} [y/N]: ").strip().lower() in {"y", "yes"}
+
+
+def remove_model(config: dict[str, Any], config_path: Path) -> bool:
+    choices = [
+        (profile, model) for profile in config["profiles"] for model in profile.get("models", [])
+    ]
+    if not choices:
+        print("Configuration -> no models are available to remove")
+        return False
+    print("\nRemove model")
+    for index, (profile, model) in enumerate(choices, start=1):
+        print(f"  {index}. {profile['name']} / {model}")
+    selected = input("Model number: ").strip()
+    if not selected.isdigit() or not 1 <= int(selected) <= len(choices):
+        raise ValueError("Invalid model selection.")
+    profile, model_name = choices[int(selected) - 1]
+    if not _confirm(f"Remove model {profile['name']} / {model_name}?"):
+        print("Configuration -> model removal cancelled")
+        return False
+    profile["models"].remove(model_name)
+    save_config(config, config_path)
+    print(f"Configuration -> removed model: {profile['name']} / {model_name}")
+    if not profile["models"]:
+        print(f"Configuration -> endpoint retained without models: {profile['name']}")
+    return True
+
+
+def remove_endpoint(config: dict[str, Any], config_path: Path) -> bool:
+    profiles = config["profiles"]
+    if not profiles:
+        print("Configuration -> no endpoints are available to remove")
+        return False
+    print("\nRemove endpoint")
+    for index, profile in enumerate(profiles, start=1):
+        models = ", ".join(profile.get("models", [])) or "no models"
+        print(f"  {index}. {profile['name']} ({profile['base_url']}) [{models}]")
+    selected = input("Endpoint number: ").strip()
+    if not selected.isdigit() or not 1 <= int(selected) <= len(profiles):
+        raise ValueError("Invalid endpoint selection.")
+    profile = profiles[int(selected) - 1]
+    if not _confirm(
+        f"Remove endpoint {profile['name']} and all {len(profile.get('models', []))} model(s)?"
+    ):
+        print("Configuration -> endpoint removal cancelled")
+        return False
+    key_ref = profile.get("key_ref")
+    profiles.remove(profile)
+    save_config(config, config_path)
+    if key_ref:
+        try:
+            keyring.delete_password(KEYRING_SERVICE, key_ref)
+        except KeyringError as exc:
+            print(f"Configuration -> endpoint removed; keyring cleanup unavailable: {exc}")
+    print(f"Configuration -> removed endpoint: {profile['name']}")
+    return True
+
+
+def get_semantic_scholar_key() -> str:
+    import os
+
+    env_key = os.environ.get(S2_ENV_VAR, "").strip()
+    if env_key:
+        print("Configuration -> using Semantic Scholar API key from environment")
+        return env_key
+    try:
+        stored = keyring.get_password(KEYRING_SERVICE, S2_KEYRING_USER) or ""
+    except KeyringError:
+        stored = ""
+    if stored:
+        print("Configuration -> using stored Semantic Scholar API key")
+        return stored
+    try:
+        value = input(
+            "Semantic Scholar API key [optional, Enter to skip, "
+            f"or set the {S2_ENV_VAR} environment variable]: "
+        ).strip()
+    except EOFError:
+        return ""
+    if not value:
+        return ""
+    try:
+        keyring.set_password(KEYRING_SERVICE, S2_KEYRING_USER, value)
+        print("Configuration -> stored Semantic Scholar API key in the keyring")
+    except KeyringError as exc:
+        print(f"Configuration -> keyring unavailable; key is session-only: {exc}")
+    return value
+
+
+def check_endpoint(llm_config: LLMConfig) -> None:
+    from langchain_openai import ChatOpenAI
+    from pydantic import SecretStr
+
+    print("Configuration -> checking endpoint availability")
+    started = time.monotonic()
+    llm = ChatOpenAI(
+        base_url=llm_config.base_url,
+        api_key=SecretStr(llm_config.api_key),
+        model=llm_config.model_name,
+        temperature=0,
+        timeout=30,
+    )
+    try:
+        response = llm.invoke("Reply with the single word: OK")
+    except Exception as exc:
+        raise ValueError(
+            "Endpoint check failed for "
+            f"{llm_config.model_name} at {llm_config.base_url}: "
+            f"{redact_secrets(exc, (llm_config.api_key,))}"
+        ) from exc
+    if not str(response.content).strip():
+        raise ValueError("Endpoint check failed: the model returned an empty response.")
+    print(f"Configuration -> endpoint check passed in {time.monotonic() - started:.1f}s")
+
+
 def choose_llm(config_path: Path = CONFIG_PATH) -> LLMConfig:
     config = load_config(config_path)
     if not config["profiles"]:
         profile, model_name = add_profile(config, config_path)
         return _to_llm_config(profile, model_name, config, config_path)
-
-    choices = [
-        (profile, model) for profile in config["profiles"] for model in profile.get("models", [])
-    ]
-    logger.info("Choose LLM")
-    for index, (profile, model) in enumerate(choices, start=1):
-        print(f"  {index}. {profile['name']} / {model}")
-    print(f"  {len(choices) + 1}. Add endpoint + API key")
-    print(f"  {len(choices) + 2}. Add model to endpoint")
-    selected = input("Selection [1]: ").strip() or "1"
-    if not selected.isdigit():
+    while True:
+        choices = [
+            (profile, model)
+            for profile in config["profiles"]
+            for model in profile.get("models", [])
+        ]
+        print("\nChoose LLM")
+        for index, (profile, model) in enumerate(choices, start=1):
+            print(f"  {index}. {profile['name']} / {model}")
+        add_endpoint_index = len(choices) + 1
+        add_model_index = len(choices) + 2
+        remove_model_index = len(choices) + 3
+        remove_endpoint_index = len(choices) + 4
+        print(f"  {add_endpoint_index}. Add endpoint + API key")
+        print(f"  {add_model_index}. Add model to endpoint")
+        print(f"  {remove_model_index}. Remove model")
+        print(f"  {remove_endpoint_index}. Remove endpoint")
+        prompt = "Selection [1]: " if choices else "Selection: "
+        selected = input(prompt).strip() or ("1" if choices else "")
+        if not selected.isdigit():
+            raise ValueError("Invalid LLM selection.")
+        selected_index = int(selected)
+        if 1 <= selected_index <= len(choices):
+            profile, model_name = choices[selected_index - 1]
+            print(f"Configuration -> using {profile['name']} / {model_name}")
+            return _to_llm_config(profile, model_name, config, config_path)
+        if selected_index == add_endpoint_index:
+            profile, model_name = add_profile(config, config_path)
+            print(f"Configuration -> using {profile['name']} / {model_name}")
+            return _to_llm_config(profile, model_name, config, config_path)
+        if selected_index == add_model_index:
+            profile, model_name = add_model(config, config_path)
+            print(f"Configuration -> using {profile['name']} / {model_name}")
+            return _to_llm_config(profile, model_name, config, config_path)
+        if selected_index == remove_model_index:
+            remove_model(config, config_path)
+            continue
+        if selected_index == remove_endpoint_index:
+            remove_endpoint(config, config_path)
+            if not config["profiles"]:
+                print("Configuration -> no endpoints remain; add one to continue")
+                profile, model_name = add_profile(config, config_path)
+                return _to_llm_config(profile, model_name, config, config_path)
+            continue
         raise ValueError("Invalid LLM selection.")
-    selected_index = int(selected)
-    if 1 <= selected_index <= len(choices):
-        profile, model_name = choices[selected_index - 1]
-    elif selected_index == len(choices) + 1:
-        profile, model_name = add_profile(config, config_path)
-    elif selected_index == len(choices) + 2:
-        profile, model_name = add_model(config, config_path)
-    else:
-        raise ValueError("Invalid LLM selection.")
-    logger.info(f"Using {profile['name']} / {model_name}")
-    return _to_llm_config(profile, model_name, config, config_path)
 
 
 def _to_llm_config(

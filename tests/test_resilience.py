@@ -1,8 +1,15 @@
 import json
+import sys
 import time
 from urllib.error import URLError
 
-from literature_rag.resilience import atomic_write_json, redact_secrets, retry, workspace_lock
+from literature_rag.resilience import (
+    atomic_write_json,
+    redact_secrets,
+    retry,
+    tee_stdout,
+    workspace_lock,
+)
 
 
 def test_atomic_json_and_secret_redaction(tmp_path):
@@ -18,7 +25,7 @@ def test_workspace_lock_rejects_concurrent_writer(tmp_path):
     with workspace_lock(tmp_path):
         assert (tmp_path / ".lock").exists()
     assert not (tmp_path / ".lock").exists()
-    
+
     # Re-entry in same thread/context should be allowed (we handle it gracefully)
     with workspace_lock(tmp_path), workspace_lock(tmp_path):
         pass  # Nested context - handled by checking our own PID
@@ -27,15 +34,15 @@ def test_workspace_lock_rejects_concurrent_writer(tmp_path):
 def test_workspace_lock_detects_stale_lock(tmp_path, monkeypatch):
     """Test that stale lock (>5 min default timeout) is detected and removed."""
     lock = tmp_path / ".lock"
-    
+
     # Create a stale lock file (10 minutes old)
     lock_data = {"pid": 99999, "timestamp": time.time() - 600}
     lock.write_text(json.dumps(lock_data), encoding="utf-8")
-    
+
     # Should succeed because lock is stale
     with workspace_lock(tmp_path):
         assert lock.exists()
-    
+
     # Lock should be cleaned up after successful operation
     assert not lock.exists()
 
@@ -46,11 +53,11 @@ def test_workspace_lock_detects_orphaned_lock(tmp_path):
     # Use PID -1 which will definitely not be valid
     lock_data = {"pid": -1, "timestamp": time.time() - 60}
     lock.write_text(json.dumps(lock_data), encoding="utf-8")
-    
+
     # Should succeed because process doesn't exist
     with workspace_lock(tmp_path):
         assert lock.exists()
-    
+
     # Lock cleaned up
     assert not lock.exists()
 
@@ -67,3 +74,20 @@ def test_retry_recovers_from_transient_network_error(monkeypatch):
 
     assert retry(operation, attempts=3, base_delay=0) == "ready"
     assert len(attempts) == 3
+
+
+def test_tee_stdout_captures_lines_and_skips_progress_updates(tmp_path):
+    log_path = tmp_path / "output" / "run.log"
+    with tee_stdout(log_path):
+        print("hello pipeline")
+        sys.stdout.write("\r[critic audit] 5s | 1,000 chars")
+        sys.stdout.write("\r[critic audit] done in 9s | 2,000 chars\n")
+    print("after exit")
+
+    content = log_path.read_text(encoding="utf-8")
+    assert "run started" in content
+    assert "hello pipeline" in content
+    assert "done in 9s" in content
+    assert "5s | 1,000 chars" not in content
+    assert "after exit" not in content
+    assert sys.stdout.write("still works\n")

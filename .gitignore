@@ -12,3 +12,5 @@ dist/
 build/
 downloaded_papers/
 literature_projects/
+.smoke_run/
+.smoke_run.console.log
