@@ -4,9 +4,11 @@ import json
 import os
 import random
 import re
+import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.error import HTTPError, URLError
@@ -71,6 +73,31 @@ def redact_secrets(message: object, secrets: tuple[str, ...] = ()) -> str:
         if secret:
             result = result.replace(secret, "[REDACTED]")
     return result
+
+
+@contextmanager
+def tee_stdout(log_path: Path) -> Iterator[None]:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    original = sys.stdout
+
+    class _Tee:
+        def write(self, data: str) -> int:
+            original.write(data)
+            if data and ("\n" in data or "\r" not in data):
+                log_file.write(data.replace("\r", ""))
+            return len(data)
+
+        def flush(self) -> None:
+            original.flush()
+            log_file.flush()
+
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"\n===== run started {datetime.now(timezone.utc).isoformat()} =====\n")
+        sys.stdout = _Tee()
+        try:
+            yield
+        finally:
+            sys.stdout = original
 
 
 @contextmanager

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,12 +15,93 @@ import arxiv
 
 from literature_rag.resilience import atomic_write_json, http_retry_after, retry
 from literature_rag.settings import (
+    ARXIV_METADATA_BATCH,
+    DEFAULT_TIER,
     DOWNLOAD_DIR,
+    DOWNLOAD_TIERS,
     MAX_PDF_BYTES,
     NETWORK_ATTEMPTS,
     NETWORK_TIMEOUT,
+    PAPER_TIERS,
     SEARCH_CACHE_VERSION,
+    TIER_DIRECTORIES,
 )
+
+QUERY_STOPWORDS = frozenset(
+    [
+        "a",
+        "about",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "based",
+        "by",
+        "for",
+        "from",
+        "how",
+        "in",
+        "into",
+        "is",
+        "of",
+        "on",
+        "onto",
+        "or",
+        "that",
+        "the",
+        "their",
+        "this",
+        "those",
+        "to",
+        "toward",
+        "towards",
+        "under",
+        "via",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "why",
+        "with",
+        "within",
+        "without",
+        "review",
+        "survey",
+        "study",
+        "approach",
+        "approaches",
+        "application",
+        "applications",
+        "method",
+        "methods",
+        "using",
+        "using",
+        "toward",
+        "new",
+        "novel",
+        "evaluation",
+        "evaluations",
+    ]
+)
+MAX_QUERY_TERMS = 8
+
+
+def _arxiv_query(topic: str, max_terms: int = MAX_QUERY_TERMS) -> str:
+    cleaned = re.sub(r"[\"“”]", " ", topic)
+    tokens = re.findall(r"[a-z0-9]+", cleaned.lower())
+    significant = [
+        token for token in dict.fromkeys(tokens) if len(token) >= 3 and token not in QUERY_STOPWORDS
+    ]
+    if not significant:
+        raise ValueError(f"The research topic has no searchable keywords: {topic!r}")
+    if len(significant) > max_terms:
+        ranked = sorted(set(significant), key=lambda token: (-len(token), token))
+        chosen = set(ranked[:max_terms])
+        significant = [token for token in significant if token in chosen]
+    return " AND ".join(f"all:{token}" for token in significant)
 
 
 @dataclass(frozen=True)
@@ -34,6 +116,8 @@ class Paper:
     year: int | None = None
     citation_count: int | None = None
     is_open_access: bool | None = None
+    abstract: str = ""
+    tier: str = ""
 
 
 DownloadedPaper = tuple[Path, Paper]
@@ -46,7 +130,14 @@ class FailedDownload:
     error: str
 
 
-def search_arxiv(topic: str, max_results: int, cache_path: Path | None = None) -> list[Paper]:
+def search_arxiv(
+    topic: str,
+    max_results: int,
+    cache_path: Path | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    max_terms: int = MAX_QUERY_TERMS,
+) -> list[Paper]:
     if not topic.strip():
         raise ValueError("The research topic cannot be empty.")
     if max_results < 1:
@@ -57,8 +148,15 @@ def search_arxiv(topic: str, max_results: int, cache_path: Path | None = None) -
         return cached
 
     print(f"Searching -> arXiv topic: {topic!r}")
+    query = _arxiv_query(topic, max_terms)
+    if year_min is not None or year_max is not None:
+        start = f"{year_min:04d}01010000" if year_min is not None else "199001010000"
+        end = f"{year_max:04d}12312359" if year_max is not None else "209912312359"
+        query = f"{query} AND submittedDate:[{start} TO {end}]"
+        print(f"Searching -> year filter: {year_min or 'any'}..{year_max or 'any'}")
+    print(f"Searching -> arXiv query: {query!r}")
     search = arxiv.Search(
-        query=f'all:"{topic.strip()}"',
+        query=query,
         max_results=max_results,
         sort_by=arxiv.SortCriterion.Relevance,
     )
@@ -71,6 +169,7 @@ def search_arxiv(topic: str, max_results: int, cache_path: Path | None = None) -
                 entry_id=result.entry_id,
                 pdf_url=result.pdf_url,
                 doi=result.doi,
+                abstract=_clean_abstract(result.summary),
             )
             for result in arxiv.Client().results(search)
         ]
@@ -83,27 +182,176 @@ def search_arxiv(topic: str, max_results: int, cache_path: Path | None = None) -
     return results
 
 
+def _clean_abstract(value: str | None) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def hydrate_abstracts(papers: list[Paper]) -> list[Paper]:
+    missing = [paper for paper in papers if not paper.abstract and _is_arxiv_id(paper.arxiv_id)]
+    if not missing:
+        return papers
+    print(f"Abstracts -> fetching {len(missing)} missing abstract(s) from arXiv")
+    resolved: dict[str, str] = {}
+    client = arxiv.Client()
+    for start in range(0, len(missing), ARXIV_METADATA_BATCH):
+        batch = missing[start : start + ARXIV_METADATA_BATCH]
+        identifiers = [paper.arxiv_id for paper in batch]
+        try:
+            for result in client.results(arxiv.Search(id_list=identifiers)):
+                short_id = result.get_short_id().lower()
+                abstract = _clean_abstract(result.summary)
+                resolved[short_id] = abstract
+                resolved.setdefault(_bare_arxiv_id(short_id), abstract)
+        except Exception as exc:
+            print(f"Abstracts -> batch unavailable: {exc}")
+            continue
+    hydrated = []
+    for paper in papers:
+        if paper.abstract:
+            hydrated.append(paper)
+            continue
+        abstract = resolved.get(paper.arxiv_id.lower()) or resolved.get(
+            _bare_arxiv_id(paper.arxiv_id), ""
+        )
+        hydrated.append(replace(paper, abstract=abstract) if abstract else paper)
+    filled = sum(1 for paper in hydrated if paper.abstract)
+    print(f"Abstracts -> available for {filled}/{len(hydrated)} paper(s)")
+    return hydrated
+
+
+def _is_arxiv_id(value: str) -> bool:
+    return not value.startswith(("doi:", "local:"))
+
+
+def _bare_arxiv_id(value: str) -> str:
+    return re.sub(r"v\d+$", "", value.strip().lower())
+
+
 def download_papers(
     papers: list[Paper], download_dir: Path = DOWNLOAD_DIR
 ) -> tuple[list[DownloadedPaper], list[FailedDownload]]:
     download_dir.mkdir(parents=True, exist_ok=True)
     downloaded: list[DownloadedPaper] = []
     failed: list[FailedDownload] = []
+    reused = 0
     for index, paper in enumerate(papers, start=1):
         filename = _paper_filename(paper)
-        target = download_dir / filename
+        target = _tier_target(download_dir, paper, filename)
+        target.parent.mkdir(parents=True, exist_ok=True)
         print(f"Downloading -> [{index}/{len(papers)}] {paper.title}")
         try:
-            if not _is_pdf(target):
-                _download_pdf(paper.pdf_url, target)
+            existing = find_existing_pdf(download_dir, filename)
+            if existing is not None:
+                downloaded.append((existing, paper))
+                reused += 1
+                continue
+            _download_pdf(paper.pdf_url, target)
             if not _is_pdf(target):
                 raise OSError("downloaded file is not a valid PDF")
             downloaded.append((target, paper))
         except Exception as exc:
             print(f"Downloading -> skipped {paper.arxiv_id}: {exc}")
             failed.append(FailedDownload(target, paper, str(exc)))
+    if reused:
+        print(f"Downloading -> reused {reused} PDF(s) already present in {download_dir}")
     print(f"Downloading -> ready: {len(downloaded)} PDF(s) in {download_dir}")
     return downloaded, failed
+
+
+def _tier_target(download_dir: Path, paper: Paper, filename: str) -> Path:
+    directory = TIER_DIRECTORIES.get(paper.tier)
+    return (download_dir / directory / filename) if directory else download_dir / filename
+
+
+def find_existing_pdf(root: Path, filename: str) -> Path | None:
+    direct = root / filename
+    if _is_pdf(direct):
+        return direct
+    if not root.is_dir():
+        return None
+    for candidate in sorted(root.rglob(filename)):
+        if _is_pdf(candidate):
+            return candidate
+    return None
+
+
+def organize_papers_by_tier(
+    downloaded: list[DownloadedPaper], papers_root: Path
+) -> list[DownloadedPaper]:
+    organized: list[DownloadedPaper] = []
+    moved = 0
+    counts: dict[str, int] = {}
+    for path, paper in downloaded:
+        tier = paper.tier if paper.tier in PAPER_TIERS else DEFAULT_TIER
+        counts[tier] = counts.get(tier, 0) + 1
+        directory = TIER_DIRECTORIES.get(tier)
+        if directory is None:
+            organized.append((path, paper))
+            continue
+        target = papers_root / directory / path.name
+        if path.resolve() == target.resolve():
+            organized.append((path, paper))
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(path), str(target))
+            moved += 1
+        except OSError as exc:
+            print(f"Tiering -> could not move {path.name}: {exc}")
+            organized.append((path, paper))
+            continue
+        organized.append((target, paper))
+    layout = ", ".join(f"{tier}: {counts[tier]}" for tier in PAPER_TIERS if tier in counts)
+    print(f"Tiering -> moved {moved} PDF(s) into tier folders ({layout or 'no papers'})")
+    return organized
+
+
+def import_workspace_pdfs(
+    papers_root: Path, known: list[DownloadedPaper] | None = None
+) -> list[DownloadedPaper]:
+    if not papers_root.is_dir():
+        return []
+    claimed = {path.resolve() for path, _paper in known or []}
+    extras = [
+        candidate
+        for candidate in sorted(papers_root.rglob("*.pdf"))
+        if candidate.resolve() not in claimed
+    ]
+    if not extras:
+        return []
+    print(f"Workspace import -> found {len(extras)} unclaimed PDF(s) under {papers_root}")
+    imported: list[DownloadedPaper] = []
+    for source in extras:
+        if not _is_pdf(source):
+            print(f"Workspace import -> skipped invalid PDF: {source.name}")
+            continue
+        imported.append((source, _pdf_paper(source, _workspace_tier(source, papers_root))))
+    print(f"Workspace import -> ready {len(imported)} PDF(s)")
+    return imported
+
+
+def _workspace_tier(path: Path, papers_root: Path) -> str:
+    try:
+        relative = path.resolve().relative_to(papers_root.resolve())
+    except ValueError:
+        return DEFAULT_TIER
+    head = relative.parts[0] if len(relative.parts) > 1 else ""
+    for tier in DOWNLOAD_TIERS:
+        if head == TIER_DIRECTORIES[tier]:
+            return tier
+    return DEFAULT_TIER
+
+
+def _pdf_paper(source: Path, tier: str = "") -> Paper:
+    digest = _file_hash(source)
+    return Paper(
+        arxiv_id=f"local:{digest[:16]}",
+        title=source.stem.replace("_", " "),
+        authors=(),
+        entry_id=source.resolve().as_uri(),
+        pdf_url="",
+        tier=tier,
+    )
 
 
 def papers_from_dois(dois: list[str]) -> list[Paper]:
@@ -122,22 +370,27 @@ def papers_from_dois(dois: list[str]) -> list[Paper]:
                 entry_id=f"https://doi.org/{doi}",
                 pdf_url="",
                 doi=doi,
+                tier="core",
             )
         )
     return papers
 
 
-def import_local_pdfs(source_dir: Path, destination_dir: Path) -> list[DownloadedPaper]:
+def import_local_pdfs(
+    source_dir: Path, destination_dir: Path, tier: str = "core"
+) -> list[DownloadedPaper]:
     if not source_dir.exists() or not source_dir.is_dir():
         raise ValueError(f"Local PDF folder does not exist: {source_dir}")
-    destination_dir.mkdir(parents=True, exist_ok=True)
+    directory = TIER_DIRECTORIES.get(tier, "")
+    destination_root = destination_dir / directory if directory else destination_dir
+    destination_root.mkdir(parents=True, exist_ok=True)
     imported: list[DownloadedPaper] = []
-    for source in sorted(source_dir.glob("*.pdf")):
+    for source in sorted(source_dir.rglob("*.pdf")):
         if not _is_pdf(source):
             print(f"Import -> skipped invalid PDF: {source.name}")
             continue
         digest = _file_hash(source)
-        target = destination_dir / f"local_{digest[:12]}_{_safe_filename(source.stem)}.pdf"
+        target = destination_root / f"local_{digest[:12]}_{_safe_filename(source.stem)}.pdf"
         if source.resolve() != target.resolve() and not target.exists():
             shutil.copy2(source, target)
         paper = Paper(
@@ -146,6 +399,7 @@ def import_local_pdfs(source_dir: Path, destination_dir: Path) -> list[Downloade
             authors=(),
             entry_id=source.resolve().as_uri(),
             pdf_url="",
+            tier=tier,
         )
         imported.append((target, paper))
         print(f"Import -> ready {source.name}")
@@ -178,6 +432,9 @@ def recover_manual_downloads(
     print("\nManual download required")
     print("Some PDFs could not be retrieved automatically. This can be caused by")
     print("network restrictions, unavailable files, or publisher access controls.")
+    print("Pressing Enter retries the automatic download and rechecks. If it still")
+    print("fails, open the arXiv/DOI URL below in a browser, save the PDF to the")
+    print("exact 'Save as' path, then press Enter again. Type 's' to skip.")
     for index, item in enumerate(failed, start=1):
         print(f"\n[{index}] {item.paper.title}")
         print(f"    arXiv: {item.paper.entry_id}")
@@ -204,9 +461,12 @@ def recover_manual_downloads(
 
         remaining: list[FailedDownload] = []
         for item in pending:
+            if not _is_pdf(item.target) and item.paper.pdf_url:
+                with contextlib.suppress(Exception):
+                    _download_pdf(item.paper.pdf_url, item.target)
             if _is_pdf(item.target):
                 downloaded.append((item.target, item.paper))
-                print(f"Manual download -> found {item.target.name}")
+                print(f"Manual download -> recovered {item.target.name}")
             else:
                 remaining.append(item)
                 print(f"Manual download -> still missing/invalid: {item.target.name}")
@@ -307,6 +567,8 @@ def load_search_cache(
                 year=item.get("year"),
                 citation_count=item.get("citation_count"),
                 is_open_access=item.get("is_open_access"),
+                abstract=item.get("abstract") or "",
+                tier=item.get("tier") or "",
             )
             for item in data["papers"]
         ]
@@ -342,6 +604,8 @@ def save_search_cache(
                 "year": paper.year,
                 "citation_count": paper.citation_count,
                 "is_open_access": paper.is_open_access,
+                "abstract": paper.abstract,
+                "tier": paper.tier,
             }
             for paper in papers
         ],

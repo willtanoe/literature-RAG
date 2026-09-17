@@ -1,9 +1,16 @@
 import json
+import sys
 from urllib.error import URLError
 
 import pytest
 
-from literature_rag.resilience import atomic_write_json, redact_secrets, retry, workspace_lock
+from literature_rag.resilience import (
+    atomic_write_json,
+    redact_secrets,
+    retry,
+    tee_stdout,
+    workspace_lock,
+)
 
 
 def test_atomic_json_and_secret_redaction(tmp_path):
@@ -33,3 +40,20 @@ def test_retry_recovers_from_transient_network_error(monkeypatch):
 
     assert retry(operation, attempts=3, base_delay=0) == "ready"
     assert len(attempts) == 3
+
+
+def test_tee_stdout_captures_lines_and_skips_progress_updates(tmp_path):
+    log_path = tmp_path / "output" / "run.log"
+    with tee_stdout(log_path):
+        print("hello pipeline")
+        sys.stdout.write("\r[critic audit] 5s | 1,000 chars")
+        sys.stdout.write("\r[critic audit] done in 9s | 2,000 chars\n")
+    print("after exit")
+
+    content = log_path.read_text(encoding="utf-8")
+    assert "run started" in content
+    assert "hello pipeline" in content
+    assert "done in 9s" in content
+    assert "5s | 1,000 chars" not in content
+    assert "after exit" not in content
+    assert sys.stdout.write("still works\n")
