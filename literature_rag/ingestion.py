@@ -60,14 +60,21 @@ def load_and_split_papers(downloaded: list[DownloadedPaper]) -> list[Any]:
                 chunk.metadata["evidence_id"] = (
                     f"{_paper_id(paper.arxiv_id)}-p{page_number}-c{index}"
                 )
+            # Enforce budget BEFORE extending to prevent overflow
+            projected = len(chunks) + len(paper_chunks)
+            if projected > MAX_CHUNKS:
+                excess = projected - MAX_CHUNKS
+                dropped = paper_chunks[-excess:] if excess <= len(paper_chunks) else paper_chunks
+                paper_chunks = paper_chunks[:-excess] if excess <= len(paper_chunks) else []
+                print(f"Embedding -> truncated {len(dropped)} chunk(s) to stay within budget")
             chunks.extend(paper_chunks)
-            if len(chunks) > MAX_CHUNKS:
-                raise RuntimeError(f"Corpus exceeds {MAX_CHUNKS} chunks")
         except Exception as exc:
             print(f"Embedding -> skipped {path.name}: {exc}")
     chunks = [chunk for chunk in chunks if chunk.page_content.strip()]
     if not chunks:
         raise RuntimeError("No readable text was extracted from the downloaded PDFs.")
+    if len(chunks) > MAX_CHUNKS:
+        raise RuntimeError(f"Corpus exceeds {MAX_CHUNKS} chunks after truncation")
     print(f"Embedding -> created {len(chunks)} chunk(s)")
     return chunks
 

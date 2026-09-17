@@ -4,13 +4,13 @@ REPORT = """# Evidence Matrix
 | Paper | Venue/Year | Dataset or Sample | Method | Metrics | Main Finding |
 | Limitations | Evidence Pages |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| A | 2025 | X | Y | Z | Result [Pabc-p1-c1 | A | p. 1] | None | 1 |
+| A | 2025 | X | Y | Z | Result [Pabc-p1-c1 • Title • p. 1] | None | 1 |
 # Executive Summary of Main Methodologies
-Summary [Pabc-p1-c1 | A | p. 1].
+Summary [Pabc-p1-c1 • Title • p. 1].
 # Comparative Analysis: Pros, Cons, and Performance Trade-offs
-Comparison [Pabc-p1-c1 | A | p. 1].
+Comparison [Pabc-p1-c1 • Title • p. 1].
 # Unresolved Research Gaps and Blind Spots
-Gap [Pabc-p1-c1 | A | p. 1].
+Gap [Pabc-p1-c1 • Title • p. 1].
 """
 
 
